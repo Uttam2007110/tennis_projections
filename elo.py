@@ -13,9 +13,10 @@ import random
 from math import ceil, log2
 from datetime import datetime
 
-surface = 'c' # c, g, h
-entrants = 56
-seeds = 16
+gw = 3
+
+path = 'C:/Users/uttam/Desktop/Sports/tennis'
+#path = 'C:/Users/Subramanya.Ganti/Downloads/Sports/tennis'
 
 #%% functions
 def extract_elo_data(use_scrapper):
@@ -27,10 +28,10 @@ def extract_elo_data(use_scrapper):
         tables = pd.read_html(html)
         df = tables[2]
     else:
-        df =  pd.read_excel('C:/Users/Subramanya.Ganti/Downloads/Sports/tennis/copy.xlsx','Sheet1')
+        df =  pd.read_excel(f'{path}/elo_data_copy.xlsx','Sheet1')
         
     df.columns = df.columns.str.replace('\xa0', ' ')
-    df['Player'] = df['Player'].replace('old_value', 'new_value')
+    df['Player'] = df['Player'].str.replace('\xa0', ' ')
     return df
 
 def extract_tournament_draw(tournament):
@@ -84,14 +85,14 @@ def extract_tournament_draw(tournament):
         return "No data found in the variable string."
     
 def randomize_seeds(l):
-    g0 = l[0:1]
-    g1 = l[1:2]
+    g0 = l[0:2]
+    #g1 = l[1:2]
     g2 = l[2:4]; random.shuffle(g2)
     g3 = l[4:8]; random.shuffle(g3)
     g4 = l[8:16]; random.shuffle(g4)
     g5 = l[16:32]; random.shuffle(g5)
     
-    new_l = g0 + g1 + g2 + g3 + g4 + g5
+    new_l = g0 + g2 + g3 + g4 + g5
     return new_l
     
 def generate_tennis_draw(n_players, m_seeds):
@@ -181,6 +182,17 @@ def p_to_pts(df,level):
     except: df
     return df
 
+def prelim_data_adj(df,surface,df_tourn):    
+    df = df[['Player',f'{surface}Elo','ATP Rank']]
+    df.columns = ['Player','Elo','ATP Rank']
+
+    df_adj = df.merge(df_tourn, left_on='Player', right_on='name', how='outer')
+    df_adj = df_adj.dropna(subset=['Player'])
+
+    df_adj = df_adj.sort_values(by='ATP Rank', ascending=True)
+    df_adj['ATP Rank'] = range(1,len(df)+1)
+    return df_adj
+
 def tournament_sim(pdata, player_count, seeds, print_results):
     draw = generate_tennis_draw(player_count, seeds)
     draw = draw.merge(pdata, left_on='Rank', right_on='ATP Rank', how='left')
@@ -239,36 +251,76 @@ def monte_carlo_tournament_sims(iters, pdata, player_count, seeds, print_results
     all_sims = pd.concat(all_sims)
     column_names = all_sims.columns.to_list()
     required_columns = [i for i in column_names if i[0] == 'R']
-    all_sims = all_sims.pivot_table(index=['Rank', 'Player', 'Elo'], 
+    all_sims = all_sims.pivot_table(index=['ATP Rank', 'Player', 'Elo', 'price'], 
                                   values = ['xPts', 'Seed'] + required_columns, 
                                   aggfunc="mean")
     all_sims = all_sims.reset_index()
     
-    all_sims = all_sims[['Rank','Player','Elo','Seed']+required_columns+['xPts']]
+    all_sims = all_sims[['ATP Rank','Player','Elo','Seed','price']+required_columns+['xPts']]
     all_sims = all_sims[all_sims['Player']!='BYE']
     all_sims.loc[all_sims['Seed']==1000,'Seed'] = np.nan
     all_sims = all_sims.drop(columns=['Rank'])
     
     print("sim time in minutes",round((datetime.now()-start_time).total_seconds()/60,2))
     return all_sims
+
+def mc_sims_for_gameweek(gw, pdata, gwtourn, iters):
+    mc_sim_gw = []
+    
+    for t in gw_tournament[f'{gw}'].dropna().unique():
+        print()
+        print(t)
+        key_t = tournament_mapping(t)
+        
+        pdata_t = prelim_data_adj(pdata,key_t[0],gwtourn)
+        df_pdata = pdata_t[pdata_t[f'{gw}']==t]
+        df_pdata = df_pdata.sort_values(by='ATP Rank', ascending=True)
+        df_pdata['ATP Rank'] = range(1,len(df_pdata)+1)
+        
+        mc_sim_t = monte_carlo_tournament_sims(iters, df_pdata, key_t[1], key_t[2], 0)
+        mc_sim_t = mc_sim_t.drop(columns=['ATP Rank'])
+        mc_sim_t['xPts/price'] = mc_sim_t['xPts']/mc_sim_t['price']
+        mc_sim_t = mc_sim_t.sort_values(by=['xPts'], ascending=[False])
+        
+        mc_sim_gw.append(mc_sim_t)
+        
+    return mc_sim_gw
+
+def check_name_match(df_ta, df_atp):
+    df_merged = df_ta.merge(df_atp, left_on='Player', right_on='name', how='outer')
+    return df_merged
+
+def tournament_mapping(t):
+    MAP = {
+            ('Monte-Carlo'): ['c',56,16],
+            ('Barcelona'): ['c',32,8],
+            ('Munich'): ['c',32,8],
+            ('Madrid'): ['c',96,32],
+            }
+    comp = MAP[t]
+    return comp
     
 #%% extract data
-#data = extract_tournament_draw('')
-#data = p_to_pts(data,'1000')
-
 player_data = extract_elo_data(0)
 
-pdata = player_data[['Player',f'{surface}Elo','ATP Rank']]
-pdata.columns = ['Player','Elo','ATP Rank']
+#%% tournament data from the ATP site
+gw_tournament = pd.read_csv(f'{path}/players.csv', sep=',',low_memory=False)
 
-pdata = pdata.sort_values(by='ATP Rank', ascending=True)
-pdata['ATP Rank'] = range(1,len(pdata)+1)
-#pdata['ATP Rank'] = pdata['ATP Rank'].fillna(2000)
+#name corrections to match ATP names with tennis abstract
+gw_tournament['name'] = gw_tournament['name'].str.replace('Alex de Minaur', 'Alex De Minaur')
+gw_tournament['name'] = gw_tournament['name'].str.replace('Botic van de Zandschulp', 'Botic Van De Zandschulp')
+gw_tournament['name'] = gw_tournament['name'].str.replace('Daniel Merida', 'Daniel Merida Aguilar')
+gw_tournament['name'] = gw_tournament['name'].str.replace('Felix Auger-Aliassime', 'Felix Auger Aliassime')
+gw_tournament['name'] = gw_tournament['name'].str.replace('Jan-Lennard Struff', 'Jan Lennard Struff')
+
+#name_checks = check_name_match(player_data, gw_tournament)
 
 #%% monte carlo sims
 
 #draw = generate_tennis_draw(entrants, seeds)
 
-#sim = tournament_sim(pdata, entrants, seeds, 1)
+#sim = tournament_sim(prelim_data_adj(player_data,'c',gw_tournament), 56, 16, 1)
 
-mc_sim = monte_carlo_tournament_sims(1000, pdata, entrants, seeds, 0)
+#mc_sim = monte_carlo_tournament_sims(1000, prelim_data_adj(player_data,'c',gw_tournament), 56, 16, 0)
+
+mc_sim_gw = mc_sims_for_gameweek(gw, player_data, gw_tournament, 1000)
